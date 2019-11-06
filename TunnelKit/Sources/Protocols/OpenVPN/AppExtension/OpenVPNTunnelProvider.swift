@@ -585,50 +585,109 @@ extension OpenVPNTunnelProvider: OpenVPNSessionDelegate {
         return nil
     }
 
+    static private func isValidIP(_ s: String) -> Bool {
+        do {
+            let regex = try NSRegularExpression(pattern: "\\d+\\.\\d+\\.\\d+\\.\\d+", options: [])
+            return regex.numberOfMatches(in: s, options: [], range: NSMakeRange(0, s.count)) > 0
+        } catch {
+            return false
+        }
+    }
+
+    private func routeAddresses(_ destination: String, allowPullFQDN: Bool) -> [String]? {
+        if OpenVPNTunnelProvider.isValidIP(destination) {
+            return [destination]
+        }
+
+        if !allowPullFQDN {
+            log.info("Error: not allowed to resolve \"\(destination.maskedDescription)\" without allow-pull-fqdn")
+            return nil
+        }
+
+        let (addresses, error) = DNSResolver.resolveSynchronously(destination, timeout: 8000)
+
+        if let error = error {
+            log.info("Error: couldn't resolve hostname: \(destination.maskedDescription)")
+            log.info("Reason: \(error)")
+            return nil
+        }
+
+        if addresses == nil || (addresses?.count ?? 0) == 0 {
+            log.info("Error: couldn't resolve hostname: \(destination.maskedDescription)")
+            log.info("Reason: no addresses found")
+            return nil
+        }
+
+        return addresses
+    }
+
+    private func getIPv4Settings(localOptions: OpenVPN.Configuration, options: OpenVPN.Configuration, isIPv4Gateway: Bool, allowPullFQDN: Bool) -> NEIPv4Settings? {
+        guard let ipv4 = applicableIPv4Settings(localOptions: localOptions, options: options)  else {
+            return nil
+        }
+
+        var includedRoutes: [NEIPv4Route] = []
+        var excludedRoutes: [NEIPv4Route] = []
+
+        guard let addresses = routeAddresses(ipv4.address, allowPullFQDN: allowPullFQDN) else {
+            return nil
+        }
+        guard let defaultGateway = routeAddresses(ipv4.defaultGateway, allowPullFQDN: allowPullFQDN)?.first else {
+            return nil
+        }
+        let defaultGatewayDescription = ipv4.defaultGateway == defaultGateway ? defaultGateway : "\(ipv4.defaultGateway) (\(defaultGateway))"
+
+        // route all traffic to VPN?
+        if isIPv4Gateway {
+            let defaultRoute = NEIPv4Route.default()
+            defaultRoute.gatewayAddress = defaultGateway
+            includedRoutes.append(defaultRoute)
+//                for network in ["0.0.0.0", "128.0.0.0"] {
+//                    let route = NEIPv4Route(destinationAddress: network, subnetMask: "128.0.0.0")
+//                    route.gatewayAddress = defaultGateway
+//                    routes.append(route)
+//                }
+            log.info("Routing.IPv4: Setting default gateway to \(defaultGatewayDescription)")
+        }
+
+        let clientAndServerRoutes = (options.ipv4?.routes ?? []) + (localOptions.ipv4?.routes ?? []);
+
+        for r in clientAndServerRoutes {
+            guard let destinationAddresses = routeAddresses(r.destination, allowPullFQDN: allowPullFQDN) else {
+                continue
+            }
+
+            for destinationAddress in destinationAddresses {
+                let destinationDescription = destinationAddress == r.destination ? destinationAddress : "\(r.destination) (\(destinationAddress))"
+                let ipv4Route = NEIPv4Route(destinationAddress: destinationAddress, subnetMask: r.mask)
+
+                if r.gateway == "net_gateway" {
+                    excludedRoutes.append(ipv4Route)
+                    log.info("Routing.IPv4: Excluding route \(destinationDescription.maskedDescription)/\(r.mask)")
+                } else {
+                    let gateway = r.gateway == "vpn_gateway" ? defaultGateway : r.gateway;
+                    ipv4Route.gatewayAddress = gateway
+                    includedRoutes.append(ipv4Route)
+                    log.info("Routing.IPv4: Adding route \(destinationDescription.maskedDescription)/\(r.mask) -> \(gateway.maskedDescription)")
+                }
+            }
+        }
+
+        let ipv4Settings = NEIPv4Settings(addresses: addresses, subnetMasks: [ipv4.addressMask])
+        ipv4Settings.includedRoutes = includedRoutes
+        ipv4Settings.excludedRoutes = excludedRoutes
+
+        return ipv4Settings
+    }
+
     private func bringNetworkUp(remoteAddress: String, localOptions: OpenVPN.Configuration, options: OpenVPN.Configuration, completionHandler: @escaping (Error?) -> Void) {
         let routingPolicies = localOptions.routingPolicies ?? options.routingPolicies
         let isIPv4Gateway = routingPolicies?.contains(.IPv4) ?? false
         let isIPv6Gateway = routingPolicies?.contains(.IPv6) ?? false
         let isGateway = isIPv4Gateway || isIPv6Gateway
-        
-        var ipv4Settings: NEIPv4Settings?
-        if let ipv4 = applicableIPv4Settings(localOptions: localOptions, options: options) {
-            var includedRoutes: [NEIPv4Route] = []
-            var excludedRoutes: [NEIPv4Route] = []
+        let allowPullFQDN = localOptions.allowPullFQDN ?? false
 
-            // route all traffic to VPN?
-            if isIPv4Gateway {
-                let defaultRoute = NEIPv4Route.default()
-                defaultRoute.gatewayAddress = ipv4.defaultGateway
-                includedRoutes.append(defaultRoute)
-//                for network in ["0.0.0.0", "128.0.0.0"] {
-//                    let route = NEIPv4Route(destinationAddress: network, subnetMask: "128.0.0.0")
-//                    route.gatewayAddress = ipv4.defaultGateway
-//                    routes.append(route)
-//                }
-                log.info("Routing.IPv4: Setting default gateway to \(ipv4.defaultGateway.maskedDescription)")
-            }
-            
-            let clientAndServerRoutes = (options.ipv4?.routes ?? []) + (localOptions.ipv4?.routes ?? []);
-            
-            for r in clientAndServerRoutes {
-                let ipv4Route = NEIPv4Route(destinationAddress: r.destination, subnetMask: r.mask)
-
-                if r.gateway == "net_gateway" {
-                    excludedRoutes.append(ipv4Route)
-                    log.info("Routing.IPv4: Excluding route \(r.destination.maskedDescription)/\(r.mask)")
-                } else {
-                    let gateway = r.gateway == "vpn_gateway" ? ipv4.defaultGateway : r.gateway;
-                    ipv4Route.gatewayAddress = gateway
-                    includedRoutes.append(ipv4Route)
-                    log.info("Routing.IPv4: Adding route \(r.destination.maskedDescription)/\(r.mask) -> \(gateway.maskedDescription)")
-                }
-            }
-            
-            ipv4Settings = NEIPv4Settings(addresses: [ipv4.address], subnetMasks: [ipv4.addressMask])
-            ipv4Settings?.includedRoutes = includedRoutes
-            ipv4Settings?.excludedRoutes = excludedRoutes
-        }
+        let ipv4Settings = getIPv4Settings(localOptions: localOptions, options: options, isIPv4Gateway: isIPv4Gateway, allowPullFQDN: allowPullFQDN)
 
         var ipv6Settings: NEIPv6Settings?
         if let ipv6 = applicableIPv6Settings(localOptions: localOptions, options: options) {

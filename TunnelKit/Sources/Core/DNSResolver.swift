@@ -73,6 +73,28 @@ public class DNSResolver {
         }
     }
     
+    /**
+     Resolves a hostname synchronously.
+
+     - Parameter hostname: The hostname to resolve.
+     - Parameter timeout: The timeout in milliseconds.
+     */
+    public static func resolveSynchronously(_ hostname: String, timeout: Int) -> ([String]?, Error?) {
+        let semaphore = DispatchSemaphore(value: 0)
+        var addresses: [String]? = nil
+        var error: Error? = nil
+
+        resolve(hostname, timeout: timeout, queue: DNSResolver.queue) { (inAddresses, inError) in
+            addresses = inAddresses
+            error = inError
+            semaphore.signal()
+        }
+
+        let _ = semaphore.wait(timeout: DispatchTime.distantFuture)
+
+        return (addresses, error)
+    }
+
     private static func didResolve(host: CFHost, completionHandler: @escaping ([String]?, Error?) -> Void) {
         var success: DarwinBoolean = false
         guard let rawAddresses = CFHostGetAddressing(host, &success)?.takeUnretainedValue() as Array? else {

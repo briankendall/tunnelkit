@@ -86,11 +86,11 @@ extension OpenVPN {
             
             static let ifconfig6 = NSRegularExpression("^ifconfig-ipv6 +[\\da-fA-F:]+/\\d+ [\\da-fA-F:]+")
             
-            static let route = NSRegularExpression("^route +[\\d\\.]+( +[\\d\\.]+)( +[\\d\\.]+| vpn_gateway| net_gateway)")
+            static let route = NSRegularExpression(#"^route +[\da-zA-Z-\.]+( +[\d\.]+( vpn_gateway| net_gateway| [\da-zA-Z-\.]+)?)?"#)
             
             static let route6 = NSRegularExpression("^route-ipv6 +[\\da-fA-F:]+/\\d+( +[\\da-fA-F:]+){0,2}")
             
-            static let gateway = NSRegularExpression("^route-gateway +[\\d\\.]+")
+            static let gateway = NSRegularExpression("^route-gateway +[\\d\\.a-zA-Z-]+")
             
             static let dns = NSRegularExpression("^dhcp-option +DNS6? +[\\d\\.a-fA-F:]+")
             
@@ -101,6 +101,8 @@ extension OpenVPN {
             static let proxyBypass = NSRegularExpression("^dhcp-option +PROXY_BYPASS +.+")
             
             static let redirectGateway = NSRegularExpression("^redirect-gateway.*")
+
+            static let allowPullFQDN = NSRegularExpression("^allow-pull-fqdn")
 
             // MARK: Unsupported
             
@@ -231,6 +233,7 @@ extension OpenVPN {
             var optProxyAutoConfigurationURL: URL?
             var optProxyBypass: [String]?
             var optRedirectGateway: Set<RedirectGateway>?
+            var optAllowPullFQDN: Bool?
 
             log.verbose("Configuration file:")
             for line in lines {
@@ -492,6 +495,7 @@ extension OpenVPN {
                     let address = routeEntryArguments[0]
                     let mask = (routeEntryArguments.count > 1) ? routeEntryArguments[1] : "255.255.255.255"
                     let gateway = (routeEntryArguments.count > 2) ? routeEntryArguments[2] : "vpn_gateway"
+                    log.info("route: '\(address)'  '\(mask)'  '\(gateway)'")
                     optRoutes4.append((address, mask, gateway))
                 }
                 Regex.route6.enumerateArguments(in: line) {
@@ -575,6 +579,10 @@ extension OpenVPN {
                         }
                         optRedirectGateway?.insert(opt)
                     }
+                }
+                Regex.allowPullFQDN.enumerateComponents(in: line) { (_) in
+                    isHandled = true
+                    optAllowPullFQDN = true
                 }
 
                 //
@@ -663,6 +671,8 @@ extension OpenVPN {
             sessionBuilder.peerId = optPeerId
             
             // MARK: Routing
+
+            sessionBuilder.allowPullFQDN = optAllowPullFQDN
             
             //
             // excerpts from OpenVPN manpage

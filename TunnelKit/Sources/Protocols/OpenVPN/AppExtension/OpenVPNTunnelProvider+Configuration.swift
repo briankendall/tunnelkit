@@ -193,6 +193,8 @@ extension OpenVPNTunnelProvider {
             
             static let routingPolicies = "RoutingPolicies"
             
+            static let allowPullFQDN = "allowPullFQDN"
+
             // MARK: Customization
 
             static let prefersResolvedAddresses = "PrefersResolvedAddresses"
@@ -566,6 +568,9 @@ private extension OpenVPN.Configuration {
                 return policy
             }
         }
+        if let allowPullFQDN = providerConfiguration[S.allowPullFQDN] as? Bool {
+            builder.allowPullFQDN = allowPullFQDN
+        }
         return builder.build()
     }
     
@@ -641,6 +646,9 @@ private extension OpenVPN.Configuration {
         if let routingPolicies = routingPolicies {
             dict[S.routingPolicies] = routingPolicies.map { $0.rawValue }
         }
+        if let allowPullFQDN = allowPullFQDN {
+            dict[S.allowPullFQDN] = allowPullFQDN
+        }
     }
     
     func print() {
@@ -698,6 +706,11 @@ private extension OpenVPN.Configuration {
             log.info("\tGateway: \(routingPolicies.map { $0.rawValue })")
         } else {
             log.info("\tGateway: not configured")
+        }
+        if allowPullFQDN ?? false {
+            log.info("\tAllow pull FQDN: enabled")
+        } else {
+            log.info("\tAllow pull FQDN: disabled")
         }
         if let dnsServers = dnsServers, !dnsServers.isEmpty {
             log.info("\tDNS: \(dnsServers.maskedDescription)")

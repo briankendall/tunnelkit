@@ -274,6 +274,9 @@ extension OpenVPN {
         /// Policies for redirecting traffic through the VPN gateway.
         public var routingPolicies: [RoutingPolicy]?
         
+        /// Allows specifying a fully qualified domain name in route
+        public var allowPullFQDN: Bool?
+
         /// :nodoc:
         public init() {
         }
@@ -312,7 +315,8 @@ extension OpenVPN {
                 httpsProxy: httpsProxy,
                 proxyAutoConfigurationURL: proxyAutoConfigurationURL,
                 proxyBypassDomains: proxyBypassDomains,
-                routingPolicies: routingPolicies
+                routingPolicies: routingPolicies,
+                allowPullFQDN: allowPullFQDN
             )
         }
 
@@ -421,6 +425,9 @@ extension OpenVPN {
         /// - Seealso: `ConfigurationBuilder.routingPolicies`
         public let routingPolicies: [RoutingPolicy]?
         
+        /// - Seealso: `ConfigurationBuilder.allowPullFQDN`
+        public let allowPullFQDN: Bool?
+
         // MARK: Shortcuts
         
         /// :nodoc:
@@ -479,6 +486,7 @@ extension OpenVPN.Configuration {
         builder.proxyAutoConfigurationURL = proxyAutoConfigurationURL
         builder.proxyBypassDomains = proxyBypassDomains
         builder.routingPolicies = routingPolicies
+        builder.allowPullFQDN = allowPullFQDN
         return builder
     }
 }
