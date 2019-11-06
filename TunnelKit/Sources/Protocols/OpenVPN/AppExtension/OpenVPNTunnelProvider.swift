@@ -131,6 +131,13 @@ open class OpenVPNTunnelProvider: NEPacketTunnelProvider {
     open override func startTunnel(options: [String : NSObject]? = nil, completionHandler: @escaping (Error?) -> Void) {
 
         // required configuration
+        memoryLog.start(with: [])
+        configureLogging(
+            debug: false,
+            customFormat: "$DHH:mm:ss$d - $M"
+        )
+        
+        log.info("*** startTunnel! ***");
         do {
             guard let tunnelProtocol = protocolConfiguration as? NETunnelProviderProtocol else {
                 throw ProviderConfigurationError.parameter(name: "protocolConfiguration")
@@ -143,6 +150,9 @@ open class OpenVPNTunnelProvider: NEPacketTunnelProvider {
             }
             try appGroup = Configuration.appGroup(from: providerConfiguration)
             try cfg = Configuration.parsed(from: providerConfiguration)
+            
+            log.info("providerConfiguration: \(String(describing: tunnelProtocol.providerConfiguration))");
+            log.info("cfg: \(String(describing: cfg))");
             
             // inject serverAddress into sessionConfiguration.hostname
             if !serverAddress.isEmpty {
@@ -189,7 +199,7 @@ open class OpenVPNTunnelProvider: NEPacketTunnelProvider {
             existingLog.append("")
             existingLog.append(logSeparator)
             existingLog.append("")
-            memoryLog.start(with: existingLog)
+            //memoryLog.start(with: existingLog)
         }
 
         configureLogging(
@@ -567,6 +577,9 @@ extension OpenVPNTunnelProvider: OpenVPNSessionDelegate {
         let isIPv6Gateway = routingPolicies?.contains(.IPv6) ?? false
         let isGateway = isIPv4Gateway || isIPv6Gateway
 
+        log.info("bringNetworkUp options.ipv4: \(String(describing: options.ipv4))")
+        log.info("bringNetworkUp localOptions.ipv4: \(String(describing: localOptions.ipv4))")
+        
         var ipv4Settings: NEIPv4Settings?
         if let ipv4 = options.ipv4 {
             var routes: [NEIPv4Route] = []
@@ -583,6 +596,8 @@ extension OpenVPNTunnelProvider: OpenVPNSessionDelegate {
 //                }
                 log.info("Routing.IPv4: Setting default gateway to \(ipv4.defaultGateway.maskedDescription)")
             }
+            
+            log.info("ipv4.routes in bringNetworkUp: \(ipv4.routes)")
             
             for r in ipv4.routes {
                 let ipv4Route = NEIPv4Route(destinationAddress: r.destination, subnetMask: r.mask)

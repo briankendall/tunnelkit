@@ -35,6 +35,8 @@
 //
 
 import Foundation
+import SwiftyBeaver  // Bri
+private let log = SwiftyBeaver.self // Bri
 
 extension OpenVPN {
     struct PushReply: CustomStringConvertible {
@@ -54,6 +56,7 @@ extension OpenVPN {
             original = String(message[prefixIndex...])
 
             let lines = original.components(separatedBy: ",")
+            log.info("*** Parsing configuration in PushReply ***")  // Bri
             options = try ConfigurationParser.parsed(fromLines: lines).configuration
         }
         

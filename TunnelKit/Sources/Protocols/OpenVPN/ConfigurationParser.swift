@@ -232,9 +232,11 @@ extension OpenVPN {
             var optProxyBypass: [String]?
             var optRedirectGateway: Set<RedirectGateway>?
 
-            log.verbose("Configuration file:")
+            //log.verbose("Configuration file:") // Bri
+            log.info("Configuration file:") // Bri
             for line in lines {
-                log.verbose(line)
+                //log.verbose(line) // Bri
+                log.info(line) // Bri
                 
                 var isHandled = false
                 var strippedLine = line
