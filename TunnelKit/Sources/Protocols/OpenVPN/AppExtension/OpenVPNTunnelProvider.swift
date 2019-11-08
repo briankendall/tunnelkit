@@ -705,7 +705,6 @@ extension OpenVPNTunnelProvider: OpenVPNSessionDelegate {
         guard let ipv4 = applicableIPv4Settings(localOptions: localOptions, options: options)  else {
             return nil
         }
-
         var includedRoutes: [NEIPv4Route] = []
         var excludedRoutes: [NEIPv4Route] = []
 
@@ -715,7 +714,7 @@ extension OpenVPNTunnelProvider: OpenVPNSessionDelegate {
         guard let defaultGateway = addressMap[ipv4.defaultGateway]?.ipv4.first else {
             return nil
         }
-        let defaultGatewayDescription = ipv4.defaultGateway == defaultGateway ? defaultGateway : "\(ipv4.defaultGateway) (\(defaultGateway))"
+        let defaultGatewayDescription = ipv4.defaultGateway == defaultGateway ? defaultGateway : "\(ipv4.defaultGateway): \(defaultGateway)"
 
         // route all traffic to VPN?
         if isIPv4Gateway {
@@ -727,13 +726,18 @@ extension OpenVPNTunnelProvider: OpenVPNSessionDelegate {
 //                    route.gatewayAddress = defaultGateway
 //                    routes.append(route)
 //                }
-            log.info("Routing.IPv4: Setting default gateway to \(defaultGatewayDescription)")
+            log.info("Routing.IPv4: Setting default gateway to \(defaultGatewayDescription.maskedDescription)")
         }
 
         let clientAndServerRoutes = (options.ipv4?.routes ?? []) + (localOptions.ipv4?.routes ?? [])
 
         for r in clientAndServerRoutes {
             guard let destinationAddresses = addressMap[r.destination]?.ipv4 else {
+                continue
+            }
+
+            if destinationAddresses.count == 0 {
+                log.info("Routing.IPv4: Cannot create route with destination '\(r.destination.maskedDescription)'. This hostname could not be resolved to any IPv4 addresses")
                 continue
             }
 
@@ -745,7 +749,7 @@ extension OpenVPNTunnelProvider: OpenVPNSessionDelegate {
                     excludedRoutes.append(ipv4Route)
                     log.info("Routing.IPv4: Excluding route \(destinationDescription)")
                 } else {
-                    let gateway = r.gateway == "vpn_gateway" ? defaultGateway : r.gateway;
+                    let gateway = (r.gateway == "vpn_gateway") ? defaultGateway : r.gateway;
                     ipv4Route.gatewayAddress = gateway
                     includedRoutes.append(ipv4Route)
                     log.info("Routing.IPv4: Adding route \(destinationDescription) -> \(gateway.maskedDescription)")
@@ -760,6 +764,72 @@ extension OpenVPNTunnelProvider: OpenVPNSessionDelegate {
         return ipv4Settings
     }
 
+    private func getIPv6Settings(localOptions: OpenVPN.Configuration, options: OpenVPN.Configuration, isIPv6Gateway: Bool, addressMap: [String: IPAddresses]) -> NEIPv6Settings? {
+        guard let ipv6 = applicableIPv6Settings(localOptions: localOptions, options: options)  else {
+            return nil
+        }
+        var includedRoutes: [NEIPv6Route] = []
+        var excludedRoutes: [NEIPv6Route] = []
+
+        guard let addresses = addressMap[ipv6.address]?.ipv6 else {
+            return nil
+        }
+        guard let defaultGateway = addressMap[ipv6.defaultGateway]?.ipv6.first else {
+            return nil
+        }
+        let defaultGatewayDescription = ipv6.defaultGateway == defaultGateway ? defaultGateway : "\(ipv6.defaultGateway) (\(defaultGateway))"
+
+        // route all traffic to VPN?
+        if isIPv6Gateway {
+            let defaultRoute = NEIPv6Route.default()
+            defaultRoute.gatewayAddress = defaultGateway
+            includedRoutes.append(defaultRoute)
+//                for network in ["2000::", "3000::"] {
+//                    let route = NEIPv6Route(destinationAddress: network, networkPrefixLength: 4)
+//                    route.gatewayAddress = defaultGateway
+//                    routes.append(route)
+//                }
+            log.info("Routing.IPv6: Setting default gateway to \(defaultGatewayDescription.maskedDescription)")
+        }
+
+        let clientAndServerRoutes = (options.ipv6?.routes ?? []) + (localOptions.ipv6?.routes ?? []);
+
+        for r in clientAndServerRoutes {
+            guard let destinationAddresses = addressMap[r.destination]?.ipv6 else {
+                continue
+            }
+
+            if destinationAddresses.count == 0 {
+                log.info("Routing.IPv6: Cannot create route with destination '\(r.destination.maskedDescription)'. This hostname could not be resolved to any IPv6 addresses")
+                continue
+            }
+
+            for destinationAddress in destinationAddresses {
+                let destinationDescription = (destinationAddress == r.destination) ? "\(destinationAddress.maskedDescription)/\(r.prefixLength)" : "\(r.destination.maskedDescription): \(destinationAddress.maskedDescription)/\(r.prefixLength)"
+                let ipv6Route = NEIPv6Route(destinationAddress: destinationAddress, networkPrefixLength: r.prefixLength as NSNumber)
+
+                if r.gateway == "net_gateway" {
+                    excludedRoutes.append(ipv6Route)
+                    log.info("Routing.IPv6: Excluding route \(destinationDescription)")
+                } else {
+                    let gateway = (r.gateway == "vpn_gateway") ? defaultGateway : r.gateway;
+                    ipv6Route.gatewayAddress = gateway
+                    includedRoutes.append(ipv6Route)
+                    log.info("Routing.IPv6: Adding route \(destinationDescription) -> \(gateway.maskedDescription)")
+                }
+            }
+        }
+
+        let ipv6Settings = NEIPv6Settings(
+            addresses: addresses,
+            networkPrefixLengths: [NSNumber](repeating: ipv6.addressPrefixLength as NSNumber, count: addresses.count)
+        )
+        ipv6Settings.includedRoutes = includedRoutes
+        ipv6Settings.excludedRoutes = excludedRoutes
+
+        return ipv6Settings
+    }
+
     private func bringNetworkUp(remoteAddress: String, localOptions: OpenVPN.Configuration, options: OpenVPN.Configuration, completionHandler: @escaping (Error?) -> Void) {
         let routingPolicies = localOptions.routingPolicies ?? options.routingPolicies
         let isIPv4Gateway = routingPolicies?.contains(.IPv4) ?? false
@@ -771,37 +841,7 @@ extension OpenVPNTunnelProvider: OpenVPNSessionDelegate {
         let addressMap = getIPAddresses(hosts: hosts, allowPullFQDN: allowPullFQDN)
 
         let ipv4Settings = getIPv4Settings(localOptions: localOptions, options: options, isIPv4Gateway: isIPv4Gateway, addressMap: addressMap)
-
-        var ipv6Settings: NEIPv6Settings?
-        if let ipv6 = applicableIPv6Settings(localOptions: localOptions, options: options) {
-            var routes: [NEIPv6Route] = []
-
-            // route all traffic to VPN?
-            if isIPv6Gateway {
-                let defaultRoute = NEIPv6Route.default()
-                defaultRoute.gatewayAddress = ipv6.defaultGateway
-                routes.append(defaultRoute)
-//                for network in ["2000::", "3000::"] {
-//                    let route = NEIPv6Route(destinationAddress: network, networkPrefixLength: 4)
-//                    route.gatewayAddress = ipv6.defaultGateway
-//                    routes.append(route)
-//                }
-                log.info("Routing.IPv6: Setting default gateway to \(ipv6.defaultGateway.maskedDescription)")
-            }
-            
-            let clientAndServerRoutes = (options.ipv6?.routes ?? []) + (localOptions.ipv6?.routes ?? []);
-
-            for r in clientAndServerRoutes {
-                let ipv6Route = NEIPv6Route(destinationAddress: r.destination, networkPrefixLength: r.prefixLength as NSNumber)
-                ipv6Route.gatewayAddress = r.gateway
-                routes.append(ipv6Route)
-                log.info("Routing.IPv6: Adding route \(r.destination.maskedDescription)/\(r.prefixLength) -> \(r.gateway)")
-            }
-
-            ipv6Settings = NEIPv6Settings(addresses: [ipv6.address], networkPrefixLengths: [ipv6.addressPrefixLength as NSNumber])
-            ipv6Settings?.includedRoutes = routes
-            ipv6Settings?.excludedRoutes = []
-        }
+        let ipv6Settings = getIPv6Settings(localOptions: localOptions, options: options, isIPv6Gateway: isIPv6Gateway, addressMap: addressMap)
 
         // shut down if default gateway is not attainable
         var hasGateway = false

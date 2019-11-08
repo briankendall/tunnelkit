@@ -88,7 +88,7 @@ extension OpenVPN {
             
             static let route = NSRegularExpression(#"^route +[\da-zA-Z-\.]+( +[\d\.]+( vpn_gateway| net_gateway| [\da-zA-Z-\.]+)?)?"#)
             
-            static let route6 = NSRegularExpression("^route-ipv6 +[\\da-fA-F:]+/\\d+( +[\\da-fA-F:]+){0,2}")
+            static let route6 = NSRegularExpression(#"^route-ipv6 +[\da-zA-Z-.:]+\/\d+( vpn_gateway| net_gateway| +[\da-zA-Z-.:]+)?"#)
             
             static let gateway = NSRegularExpression("^route-gateway +[\\d\\.a-zA-Z-]+")
             
@@ -225,7 +225,7 @@ extension OpenVPN {
             var optIfconfig6Arguments: [String]?
             var optGateway4Arguments: [String]?
             var optRoutes4: [(String, String, String)] = [] // address, netmask, gateway
-            var optRoutes6: [(String, UInt8, String?)] = [] // destination, prefix, gateway
+            var optRoutes6: [(String, UInt8, String)] = [] // destination, prefix, gateway
             var optDNSServers: [String]?
             var optSearchDomains: [String]?
             var optHTTPProxy: Proxy?
@@ -495,7 +495,6 @@ extension OpenVPN {
                     let address = routeEntryArguments[0]
                     let mask = (routeEntryArguments.count > 1) ? routeEntryArguments[1] : "255.255.255.255"
                     let gateway = (routeEntryArguments.count > 2) ? routeEntryArguments[2] : "vpn_gateway"
-                    log.info("route: '\(address)'  '\(mask)'  '\(gateway)'")
                     optRoutes4.append((address, mask, gateway))
                 }
                 Regex.route6.enumerateArguments(in: line) {
@@ -510,10 +509,7 @@ extension OpenVPN {
                     }
                     
                     let destination = destinationComponents[0]
-                    var gateway = (routeEntryArguments.count > 1) ? routeEntryArguments[1] : nil // defaultGateway6
-                    if gateway == "vpn_gateway" {
-                        gateway = nil
-                    }
+                    let gateway = (routeEntryArguments.count > 1) ? routeEntryArguments[1] : "vpn_gateway"
                     optRoutes6.append((destination, prefix, gateway))
                 }
                 Regex.gateway.enumerateArguments(in: line) {
@@ -747,12 +743,22 @@ extension OpenVPN {
                 
                 let address6 = address6Components[0]
                 let defaultGateway6 = ifconfig6Arguments[1]
-                let routes6 = optRoutes6.map { IPv6Settings.Route($0.0, $0.1, $0.2 ?? defaultGateway6) }
+                let routes6 = optRoutes6.map { IPv6Settings.Route($0.0, $0.1, $0.2) }
                 
                 sessionBuilder.ipv6 = IPv6Settings(
                     address: address6,
                     addressPrefixLength: addressPrefix6,
                     defaultGateway: defaultGateway6,
+                    routes: routes6
+                )
+            } else if !optRoutes6.isEmpty {
+                // Still want to include routes when ifconfig-ipv6 is not specified
+                let routes6 = optRoutes6.map { IPv6Settings.Route($0.0, $0.1, $0.2) }
+
+                sessionBuilder.ipv6 = IPv6Settings(
+                    address: "",
+                    addressPrefixLength: 0,
+                    defaultGateway: "",
                     routes: routes6
                 )
             }
