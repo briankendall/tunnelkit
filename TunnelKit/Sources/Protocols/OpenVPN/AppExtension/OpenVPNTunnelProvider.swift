@@ -90,6 +90,7 @@ open class OpenVPNTunnelProvider: NEPacketTunnelProvider {
     private let observer = InterfaceObserver()
     
     private let tunnelQueue = DispatchQueue(label: OpenVPNTunnelProvider.description())
+    private let dnsResolverQueue = DispatchQueue(label: OpenVPNTunnelProvider.description())
     
     private let prngSeedLength = 64
     
@@ -485,6 +486,14 @@ extension OpenVPNTunnelProvider: GenericSocketDelegate {
 }
 
 extension OpenVPNTunnelProvider: OpenVPNSessionDelegate {
+    private struct IPAddresses {
+        var ipv4: [String] = []
+        var ipv6: [String] = []
+        init(ipv4: [String] = [], ipv6: [String] = []) {
+            self.ipv4 = ipv4;
+            self.ipv6 = ipv6;
+        }
+    }
     
     // MARK: OpenVPNSessionDelegate (tunnel queue)
     
@@ -585,43 +594,114 @@ extension OpenVPNTunnelProvider: OpenVPNSessionDelegate {
         return nil
     }
 
-    static private func isValidIP(_ s: String) -> Bool {
-        do {
-            let regex = try NSRegularExpression(pattern: "\\d+\\.\\d+\\.\\d+\\.\\d+", options: [])
-            return regex.numberOfMatches(in: s, options: [], range: NSMakeRange(0, s.count)) > 0
-        } catch {
-            return false
-        }
+    static private func isValidIPv4Address(_ address: String) -> Bool {
+        var s = sockaddr_in()
+        return address.withCString({ cstring in inet_pton(AF_INET, cstring, &s.sin_addr) }) == 1
     }
 
-    private func routeAddresses(_ destination: String, allowPullFQDN: Bool) -> [String]? {
-        if OpenVPNTunnelProvider.isValidIP(destination) {
-            return [destination]
-        }
-
-        if !allowPullFQDN {
-            log.info("Error: not allowed to resolve \"\(destination.maskedDescription)\" without allow-pull-fqdn")
-            return nil
-        }
-
-        let (addresses, error) = DNSResolver.resolveSynchronously(destination, timeout: 8000)
-
-        if let error = error {
-            log.info("Error: couldn't resolve hostname: \(destination.maskedDescription)")
-            log.info("Reason: \(error)")
-            return nil
-        }
-
-        if addresses == nil || (addresses?.count ?? 0) == 0 {
-            log.info("Error: couldn't resolve hostname: \(destination.maskedDescription)")
-            log.info("Reason: no addresses found")
-            return nil
-        }
-
-        return addresses
+    static private func isValidIPv6Address(_ address: String) -> Bool {
+        var s = sockaddr_in6()
+        return address.withCString({ cstring in inet_pton(AF_INET6, cstring, &s.sin6_addr) }) == 1;
     }
 
-    private func getIPv4Settings(localOptions: OpenVPN.Configuration, options: OpenVPN.Configuration, isIPv4Gateway: Bool, allowPullFQDN: Bool) -> NEIPv4Settings? {
+    // Returns a set of all IP addresses / hostnames that are used in the applicable IPv4 and IPv6 settings
+    private func gatherIPHosts(localOptions: OpenVPN.Configuration, options: OpenVPN.Configuration) -> Set<String> {
+        var result = Set<String>()
+
+        if let ipv4 = applicableIPv4Settings(localOptions: localOptions, options: options) {
+            result.formUnion([ipv4.address, ipv4.defaultGateway])
+            let clientAndServerRoutes = (options.ipv4?.routes ?? []) + (localOptions.ipv4?.routes ?? [])
+            result.formUnion(clientAndServerRoutes.map {$0.destination})
+            result.formUnion(clientAndServerRoutes.map {$0.gateway})
+        }
+
+        if let ipv6 = applicableIPv6Settings(localOptions: localOptions, options: options) {
+            result.formUnion([ipv6.address, ipv6.defaultGateway])
+            let clientAndServerRoutes = (options.ipv6?.routes ?? []) + (localOptions.ipv6?.routes ?? [])
+            result.formUnion(clientAndServerRoutes.map {$0.destination})
+            result.formUnion(clientAndServerRoutes.map {$0.gateway})
+        }
+
+        return result
+    }
+
+    /*
+     Resolves all of the hosts to IP addresses. Returns once all hosts are resolved or timed out.
+     - Returns a dictionary keying on the host and whose values are a structure containing all of the IPv4
+       and IPv6 addresses the host was resolved to.
+     - If the host is already an IP address then it is used as is.
+     - If allowPullFQDN is false then the return value will only contain IP addresses for hosts that
+       are IP addresses to begin with. No domain names will be resolved.
+    */
+    private func getIPAddresses(hosts: Set<String>, allowPullFQDN: Bool) -> ([String: IPAddresses]) {
+        var hostsToResolve: [String] = []
+        var addressMap: [String: IPAddresses] = [:]
+        let group = DispatchGroup()
+
+        for host in hosts {
+            if OpenVPNTunnelProvider.isValidIPv4Address(host) {
+                addressMap[host] = IPAddresses(ipv4:[host], ipv6:[])
+                continue
+            }
+
+            if OpenVPNTunnelProvider.isValidIPv6Address(host) {
+                addressMap[host] = IPAddresses(ipv4:[], ipv6:[host])
+                continue
+            }
+
+            addressMap[host] = IPAddresses()
+
+            if !allowPullFQDN {
+                log.info("Error: not allowed to resolve \"\(host.maskedDescription)\" without allow-pull-fqdn")
+                continue
+            }
+
+            // Keeping track of hosts that need to be resolved so that we can finish our modifications
+            // to addressMap in this thread before using DNSResolver
+            hostsToResolve.append(host)
+        }
+
+        for host in hostsToResolve {
+            group.enter()
+            DNSResolver.resolve(host, timeout: 8000, queue: dnsResolverQueue) { (addresses, error) in
+                defer {
+                    group.leave()
+                }
+
+                if let error = error {
+                    log.info("Error: couldn't resolve hostname: \(host.maskedDescription)")
+                    log.info("Reason: \(error)")
+                    return
+                }
+
+                if let addresses = addresses {
+                    if addresses.count == 0 {
+                        log.info("Error: couldn't resolve hostname: \(host.maskedDescription)")
+                        log.info("Reason: no addresses found")
+                        return
+                    }
+
+                    for address in addresses {
+                        // At this point only blocks running on dnsResolverQueue will be modifying
+                        // addressMap so we don't need to use a lock
+                        if OpenVPNTunnelProvider.isValidIPv4Address(address) {
+                            addressMap[host]?.ipv4.append(address)
+                        } else if OpenVPNTunnelProvider.isValidIPv6Address(address) {
+                            addressMap[host]?.ipv6.append(address)
+                        } else {
+                            log.info("Error: received invalid IP address \(address.maskedDescription) for: \(host.maskedDescription)")
+                        }
+                    }
+                }
+            }
+        }
+
+        group.wait()
+
+        return addressMap
+    }
+
+    private func getIPv4Settings(localOptions: OpenVPN.Configuration, options: OpenVPN.Configuration, isIPv4Gateway: Bool, addressMap: [String: IPAddresses]) -> NEIPv4Settings? {
         guard let ipv4 = applicableIPv4Settings(localOptions: localOptions, options: options)  else {
             return nil
         }
@@ -629,10 +709,10 @@ extension OpenVPNTunnelProvider: OpenVPNSessionDelegate {
         var includedRoutes: [NEIPv4Route] = []
         var excludedRoutes: [NEIPv4Route] = []
 
-        guard let addresses = routeAddresses(ipv4.address, allowPullFQDN: allowPullFQDN) else {
+        guard let addresses = addressMap[ipv4.address]?.ipv4 else {
             return nil
         }
-        guard let defaultGateway = routeAddresses(ipv4.defaultGateway, allowPullFQDN: allowPullFQDN)?.first else {
+        guard let defaultGateway = addressMap[ipv4.defaultGateway]?.ipv4.first else {
             return nil
         }
         let defaultGatewayDescription = ipv4.defaultGateway == defaultGateway ? defaultGateway : "\(ipv4.defaultGateway) (\(defaultGateway))"
@@ -650,25 +730,25 @@ extension OpenVPNTunnelProvider: OpenVPNSessionDelegate {
             log.info("Routing.IPv4: Setting default gateway to \(defaultGatewayDescription)")
         }
 
-        let clientAndServerRoutes = (options.ipv4?.routes ?? []) + (localOptions.ipv4?.routes ?? []);
+        let clientAndServerRoutes = (options.ipv4?.routes ?? []) + (localOptions.ipv4?.routes ?? [])
 
         for r in clientAndServerRoutes {
-            guard let destinationAddresses = routeAddresses(r.destination, allowPullFQDN: allowPullFQDN) else {
+            guard let destinationAddresses = addressMap[r.destination]?.ipv4 else {
                 continue
             }
 
             for destinationAddress in destinationAddresses {
-                let destinationDescription = destinationAddress == r.destination ? destinationAddress : "\(r.destination) (\(destinationAddress))"
+                let destinationDescription = (destinationAddress == r.destination) ? "\(destinationAddress.maskedDescription)/\(r.mask)" : "\(r.destination.maskedDescription): \(destinationAddress.maskedDescription)/\(r.mask)"
                 let ipv4Route = NEIPv4Route(destinationAddress: destinationAddress, subnetMask: r.mask)
 
                 if r.gateway == "net_gateway" {
                     excludedRoutes.append(ipv4Route)
-                    log.info("Routing.IPv4: Excluding route \(destinationDescription.maskedDescription)/\(r.mask)")
+                    log.info("Routing.IPv4: Excluding route \(destinationDescription)")
                 } else {
                     let gateway = r.gateway == "vpn_gateway" ? defaultGateway : r.gateway;
                     ipv4Route.gatewayAddress = gateway
                     includedRoutes.append(ipv4Route)
-                    log.info("Routing.IPv4: Adding route \(destinationDescription.maskedDescription)/\(r.mask) -> \(gateway.maskedDescription)")
+                    log.info("Routing.IPv4: Adding route \(destinationDescription) -> \(gateway.maskedDescription)")
                 }
             }
         }
@@ -687,7 +767,10 @@ extension OpenVPNTunnelProvider: OpenVPNSessionDelegate {
         let isGateway = isIPv4Gateway || isIPv6Gateway
         let allowPullFQDN = localOptions.allowPullFQDN ?? false
 
-        let ipv4Settings = getIPv4Settings(localOptions: localOptions, options: options, isIPv4Gateway: isIPv4Gateway, allowPullFQDN: allowPullFQDN)
+        let hosts = gatherIPHosts(localOptions: localOptions, options: options)
+        let addressMap = getIPAddresses(hosts: hosts, allowPullFQDN: allowPullFQDN)
+
+        let ipv4Settings = getIPv4Settings(localOptions: localOptions, options: options, isIPv4Gateway: isIPv4Gateway, addressMap: addressMap)
 
         var ipv6Settings: NEIPv6Settings?
         if let ipv6 = applicableIPv6Settings(localOptions: localOptions, options: options) {
